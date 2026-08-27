@@ -1,0 +1,51 @@
+train:
+  _target_: simwam.datasets.navsim.navsim_dataset.NavSimVideoDataset
+  navsim_log_path: ${oc.env:NAVSIM_LOG_PATH}
+  sensor_blobs_path: ${oc.env:NAVSIM_SENSOR_BLOBS_PATH}
+  scene_filter: ${oc.env:NAVSIM_DEVKIT_ROOT}/navsim/planning/script/config/common/train_test_split/scene_filter/navtrain.yaml
+  split_config_path: ${oc.env:NAVSIM_DEVKIT_ROOT}/navsim/planning/script/config/training/default_train_val_test_log_split.yaml
+  split_logs_key: train_logs
+  num_frames: 9
+  future_action_horizon: 8
+  frame_stride: 1
+  video_frame_mode: current_plus_future
+  ## when camera_layout is stitched_front, use [256, 1024]; else camera_layout = front, use [768, 1344]
+  video_size: [768, 1344]
+  camera_layout: front
+  is_training_set: true
+  text_embedding_cache_dir: ${oc.env:NAVSIM_TEXT_EMBED_CACHE,./data/text_embeds_cache/navsim}
+  context_len: 256
+  action_dim: 3
+  state_dim: 8
+  use_dynamic_prompt: false
+  trajectory_mode: absolute   # "absolute" (poses relative to current frame) | "relative" (adjacent-frame SE2 deltas)
+  proprio_dim: ${data.train.state_dim}
+  normalize_action: true
+  pretrained_norm_stats: ${oc.env:NAVSIM_STATS_PATH,./data/navsim_dataset_stats.json}
+  stats_cache_path: ${oc.env:NAVSIM_STATS_PATH,./data/navsim_dataset_stats.json}
+
+
+# val:
+#   _target_: simwam.datasets.navsim.navsim_dataset.NavSimVideoDataset
+#   navsim_log_path: ${oc.env:NAVSIM_LOG_PATH}
+#   sensor_blobs_path: ${oc.env:NAVSIM_SENSOR_BLOBS_PATH}
+#   scene_filter: ./navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtrain.yaml
+#   split_config_path: ${data.train.split_config_path}
+#   split_logs_key: val_logs
+#   num_frames: ${data.train.num_frames}
+#   future_action_horizon: ${data.train.future_action_horizon}
+#   frame_stride: ${data.train.frame_stride}
+#   video_frame_mode: ${data.train.video_frame_mode}
+#   video_size: ${data.train.video_size}
+#   camera_layout: ${data.train.camera_layout}
+#   is_training_set: false
+#   text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+#   context_len: ${data.train.context_len}
+#   action_dim: ${data.train.action_dim}
+#   state_dim: ${data.train.state_dim}
+#   use_dynamic_prompt: ${data.train.use_dynamic_prompt}
+#   trajectory_mode: ${data.train.trajectory_mode}
+#   proprio_dim: ${data.train.state_dim}
+#   normalize_action: ${data.train.normalize_action}
+#   pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+#   stats_cache_path: ${data.train.stats_cache_path}

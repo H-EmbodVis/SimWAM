@@ -1,0 +1,2 @@
+"""Model namespace for simwam."""
+

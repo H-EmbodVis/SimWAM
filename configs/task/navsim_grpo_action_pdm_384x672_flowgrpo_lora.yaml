@@ -1,0 +1,64 @@
+# @package _global_
+
+# Released FlowGRPO preset for SimWAM action-DiT reinforcement learning:
+#   Phase 1  PPO importance-ratio + clip   (grpo.train.ppo_clip_range / adv_clip_max)
+#   Phase 2  rollout reuse / inner epochs  (grpo.train.num_inner_epochs > 1)
+#   Phase 3  rigorous score-corrected SDE  (grpo.sample.sde_mode = rigorous)
+
+defaults:
+  - override /data: navsim
+  - override /model: simwam_navsim
+  - _self_
+
+batch_size: 1
+num_workers: 8
+
+model:
+  _target_: simwam.runtime_grpo.create_simwam_grpo
+  mot_checkpoint_mixed_attn: false
+  # Set this with model.checkpoint_path=/path/to/IL/checkpoint.pt or SIMWAM_IL_CHECKPOINT.
+  checkpoint_path: ${oc.env:SIMWAM_IL_CHECKPOINT,null}
+
+data:
+  train:
+    video_size: [384, 672]
+    camera_layout: front
+    trajectory_mode: absolute
+    scene_filter: ${oc.env:NAVSIM_DEVKIT_ROOT}/navsim/planning/script/config/common/train_test_split/scene_filter/navtrain_hardsub.yaml
+
+grpo:
+  lora:
+    enabled: true                 # <-- LoRA fine-tuning (vs full fine-tuning in the base task)
+    r: 16
+    alpha: 32.0
+    dropout: 0.0
+    target_modules: [q, k, v, o]  # attention projections (self + cross) in every action-DiT block
+  sample:
+    sde_mode: rigorous            # FlowGRPO score-corrected SDE
+    # NOTE: flow_grpo uses noise_level=0.7 for high-dim image latents; SimWAM's 24-dim action
+    # is tiny, and rigorous std = noise_level*sqrt(sigma/(1-sigma))*sqrt(-dsigma) explodes at
+    # high sigma -> trajectories diverge and PDM->0. Keep it small (~0.1) so samples stay
+    # in-distribution.
+    noise_level: 0.1
+  train:
+    ppo_clip_range: 0.02          # Phase 1: PPO clip (wider than video's 1e-3; small action dim => higher ratio variance)
+    adv_clip_max: 5.0             # Phase 1: clamp weighted advantage (flow_grpo style)
+    num_inner_epochs: 4           # Phase 2: reuse each rollout 4x (the core sampling-efficiency gain)
+    rollout_buffer_batches: 1     # collect 1 rollout batch per sampling phase
+  vis:
+    enabled: true        # set true to dump rollout figures (group samples + IL ODE + GT)
+    every: 100            # render every N optimizer steps
+
+# scheduler / loop -- STEP-controlled by max_steps (1 step = 1 optimizer update).
+# With num_inner_epochs=4 each sampled rollout yields 4 optimizer steps.
+lr_scheduler_type: "constant"
+learning_rate: 5.0e-5
+num_epochs: 1000000   # ignored when max_steps is set (no-op fallback)
+max_steps: 2000        # <-- training length (number of optimizer steps)
+log_every: 5
+save_every: 400
+eval_every: 100
+
+gradient_accumulation_steps: 1
+weight_decay: 1.0e-2
+resume: null

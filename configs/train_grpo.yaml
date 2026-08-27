@@ -1,0 +1,97 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: null
+  - model: null
+  - task: null
+
+
+output_dir: ./runs/grpo/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+# dataloading
+batch_size: 1
+num_workers: 8
+
+# scheduler / loop. Training length is controlled by `max_steps` (number of optimizer
+# steps), NOT by epochs: the trainer runs `while global_step < max_steps`, cycling the
+# dataset as many times as needed. Each rollout is reused by the clipped PPO objective.
+# `num_epochs` is ONLY used to derive total steps when `max_steps: null`; it is ignored
+# whenever max_steps is set. `lr_warmup_steps` caps warmup so LR reaches target fast.
+lr_scheduler_type: "constant"
+learning_rate: 5.0e-5
+lr_warmup_steps: 100
+num_epochs: 1000000   # ignored when max_steps is set (no-op fallback, kept large)
+max_steps: 300        # <-- the actual training length (number of optimizer steps)
+log_every: 1
+save_every: 150
+eval_every: 15
+
+# training
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"   # one of: [no, fp16, bf16]
+seed: 42
+max_grad_norm: 1.0
+weight_decay: 1.0e-2
+resume: null
+
+# Action-only FlowGRPO with the NAVSIM PDM score as reward.
+grpo:
+  sample:
+    group_size: 8                 # trajectories sampled per condition (group)
+    num_inference_steps: 10       # denoising steps in the action chain
+    infer_shift: null             # null -> action scheduler default shift
+    min_std: 1.0e-3
+    randn_clip: 5.0
+    sde_mode: rigorous
+    noise_level: 0.1             # rigorous-SDE noise scale a; std=a*sqrt(sigma/(1-sigma))*sqrt(-dsigma). 0.1 fits the 24-dim action (flow_grpo's 0.7 is for image latents)
+  train:
+    denoising_discount: 0.6       # gamma_denoising: weights later (cleaner) steps more
+    adv_clip_lower_quantile: 0.0
+    adv_clip_upper_quantile: 1.0
+    adv_eps: 1.0e-8
+    use_bc_loss: true             # anchor to the frozen IL reference policy
+    bc_coeff: 0.1
+    ppo_clip_range: 0.02
+    adv_clip_max: 5.0
+    num_inner_epochs: 4
+    rollout_buffer_batches: 1     # how many rollout batches to collect before the inner-epoch updates
+  lora:
+    enabled: true
+    r: 16
+    alpha: 32.0
+    dropout: 0.0
+    target_modules: [q, k, v, o]  # attention projections in every action-DiT block (self + cross)
+  reward:
+    metric_cache_path: ${oc.env:NAVSIM_METRIC_CACHE_PATH,./data/metric_cache_navtrain}
+    proposal_time_horizon: 4.0
+    proposal_interval: 0.1        # -> 40 poses (closed-loop sim/score resolution)
+    model_trajectory_interval: 0.5 # -> 8 poses (model trajectory) @ 0.5s
+    progress_weight: 10.0
+    ttc_weight: 5.0
+    comfortable_weight: 2.0
+  eval:
+    enabled: true
+    num_batches: 4
+  vis:
+    enabled: false        # set true to dump rollout figures
+    every: 100            # render every N optimizer steps
+    num_conditions: 2     # how many conditions (scenes) to render per viz step
+    max_samples: 0        # how many of the G group samples to draw (<=0 -> all G)
+    plot_mode: bev_camera # "bev_camera" (front-view + BEV, two columns) | "bev" (BEV only)
+    dpi: 150
+
+wandb:
+  enabled: false
+  workspace: null
+  project: simple-wam
+  name: grpo
+  group: null
+  mode: online
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

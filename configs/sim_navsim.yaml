@@ -1,0 +1,44 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: navsim_uncond_front_384x672_1e-4
+  - _self_
+
+ckpt: null
+gpu_id: 0
+
+experiment_name: null
+
+EVALUATION:
+  split: navtest
+  output_dir: ./evaluate_results/navsim/${hydra:runtime.choices.task}/${experiment_name}/${now:%Y%m%d_%H%M%S}
+  max_samples: null
+  save_videos: true
+  save_video_limit: 50
+  save_pred_only_video: false
+  save_gt_video: false
+  infer_mode: auto
+  num_inference_steps: ${eval_num_inference_steps}
+  sigma_shift: null
+  text_cfg_scale: 1.0
+  negative_prompt: ""
+  rand_device: cpu
+  seed: 0
+  tiled: false
+  device: cuda
+  navsim_root: ./data/navsim
+  navsim_log_path: null
+  sensor_blobs_path: null
+  scene_filter: null
+  split_logs_key: null
+  split_config_path: null
+  save_actions: true
+  action_output_dir: null
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

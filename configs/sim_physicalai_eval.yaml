@@ -1,0 +1,40 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: physicalai_uncond_front_384x672_1e-4
+  - _self_
+
+ckpt: null
+gpu_id: 0
+experiment_name: null
+
+EVALUATION:
+  data_root: ${oc.env:PHYSICALAI_DATA_ROOT,./data/physicalai/front}
+  window_steps_10hz: 40
+  gt_fps: 10
+  pred_fps: 10
+  pred_horizon_s: 4.0
+  cmd_heading_th: 0.31
+  flip_lateral: false
+  max_clips: null
+  num_traj_samples: 1
+  num_inference_steps: ${eval_num_inference_steps}
+  sigma_shift: null
+  seed: 0
+  rand_device: cpu
+  tiled: false
+  device: cuda
+  save_actions: true
+  action_output_dir: null
+  save_viz: true
+  viz_dir: null
+  viz_max_samples: 50
+  output_dir: null
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

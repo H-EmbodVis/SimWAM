@@ -1,0 +1,21 @@
+train:
+  _target_: simwam.datasets.physicalai.physicalai_dataset.PhysicalAIVideoDataset
+  dataset_jsonl: ${oc.env:PHYSICALAI_TRAIN_JSONL,./data/physicalai_train.jsonl}
+  # video: current front frame + 4 future front frames at +1/+2/+3/+4s (4s @ 1Hz)
+  num_frames: 5
+  # action: future trajectory GT, 40 points @ 10Hz (4s)
+  future_action_horizon: 40
+  video_frame_mode: current_plus_future
+  video_size: [768, 1344]
+  camera_layout: front
+  is_training_set: true
+  # fixed-prompt T5 cache: identical prompt/cache as NavSim's fixed prompt
+  text_embedding_cache_dir: ${oc.env:NAVSIM_TEXT_EMBED_CACHE,./data/text_embeds_cache/navsim}
+  context_len: 256
+  action_dim: 3
+  state_dim: 8
+  use_dynamic_prompt: false
+  trajectory_mode: absolute
+  proprio_dim: ${data.train.state_dim}
+  normalize_action: true
+  norm_stats_path: ${oc.env:PHYSICALAI_STATS_PATH,./data/physicalai_dataset_stats.json}

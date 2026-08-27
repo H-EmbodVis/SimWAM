@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - override /data: navsim
+  - override /model: simwam_navsim
+  - _self_
+
+batch_size: 2
+num_workers: 8
+
+model:
+  mot_checkpoint_mixed_attn: false
+
+data:
+  train:
+    video_size: [384, 672]
+    camera_layout: front
+
+# scheduler
+lr_scheduler_type: "cosine"
+learning_rate: 1e-4
+num_epochs: 100
+max_steps: null
+log_every: 10
+save_every: 1000
+eval_every: 500
+
+gradient_accumulation_steps: 1
+weight_decay: 1e-2
+resume: null
+

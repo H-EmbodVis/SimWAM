@@ -1,0 +1,2 @@
+"""SimWAM package."""
+
