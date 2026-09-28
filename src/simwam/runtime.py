@@ -49,6 +49,7 @@ def create_simwam(
     action_scheduler=None,
     loss=None,
     mot_checkpoint_mixed_attn: bool = True,
+    mot_attention_mask_mode: str = "isolated",
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -109,6 +110,7 @@ def create_simwam(
         action_dit_pretrained_path=action_dit_pretrained_path,
         skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
         mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
+        mot_attention_mask_mode=str(mot_attention_mask_mode),
         video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
         video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
         video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
@@ -126,6 +128,11 @@ def build_datasets(data_cfg: DictConfig):
     train_ds = instantiate(data_cfg.train)
     if data_cfg.get("val") is None:
         val_ds = train_ds
+    elif "norm_stats_path" in data_cfg.val:
+        # Waymo/PhysicalAI-style datasets already receive their shared training
+        # bounds explicitly; do not inject the LeRobot-only pretrained_norm_stats.
+        logger.info("Building val dataset with norm_stats_path: %s", data_cfg.val.norm_stats_path)
+        val_ds = instantiate(data_cfg.val)
     else:
         train_stats_path = data_cfg.train.get("pretrained_norm_stats")
         default_stats_path = os.path.join(misc.get_work_dir(), "dataset_stats.json")

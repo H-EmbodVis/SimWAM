@@ -1,0 +1,6 @@
+# @package _global_
+# Reuse the common training root; the Waymo task pins the shared RL recipe.
+defaults:
+  - train
+  - override /task: waymo_grpo_rfs
+  - _self_

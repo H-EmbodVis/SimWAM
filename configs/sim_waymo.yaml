@@ -1,0 +1,17 @@
+# @package _global_
+# Full 479-sample Waymo validation, action-only inference, native 4Hz ADE/RFS.
+defaults:
+  - train
+  - override /task: waymo_uncond_front_512x480_1e-4
+  - _self_
+
+ckpt: null
+model:
+  skip_dit_load_from_pretrain: true
+
+EVALUATION:
+  output_dir: ./runs/waymo_eval/${now:%Y-%m-%d_%H-%M-%S}
+  num_inference_steps: ${eval_num_inference_steps}
+  seed: ${seed}
+  max_samples: null
+  device: cuda

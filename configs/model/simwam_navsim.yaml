@@ -6,6 +6,11 @@ load_text_encoder: false
 proprio_dim: ${data.train.proprio_dim}
 redirect_common_files: true
 mot_checkpoint_mixed_attn: true
+# MoT cross-modal attention between video/action *noise* tokens:
+#   isolated             -> action attends only the condition frame; video never sees action (default)
+#   bidirectional        -> video noise <-> action noise attend to each other
+#   action_attends_video -> action attends all video; video never sees action
+mot_attention_mask_mode: "isolated"
 action_dit_pretrained_path: checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim_3outdim.pt
 skip_dit_load_from_pretrain: false
 

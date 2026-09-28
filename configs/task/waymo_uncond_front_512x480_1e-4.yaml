@@ -1,0 +1,42 @@
+# @package _global_
+#
+# Waymo SimWAM: width 480 x height 512 (task filenames use HxW).
+# Train: current FRONT + four future images at +1/+2/+3/+4s.
+# Action: 20 native XY points, 5s @4Hz. Proprio: vx/vy/ax/ay + command(4).
+# Val: all 479 scored-reference samples, current image only; action-only ADE/RFS.
+# Fixed prompt and T5 cache are shared with PhysicalAI.
+defaults:
+  - override /data: waymo
+  - override /model: simwam_navsim
+  - _self_
+
+batch_size: 1
+num_workers: 8
+
+model:
+  mot_checkpoint_mixed_attn: false
+  mot_attention_mask_mode: isolated
+  video_dit_config:
+    action_conditioned: false
+    action_dim: ${data.train.action_dim}
+  action_dit_config:
+    action_dim: ${data.train.action_dim}
+  # The existing 3outdim file stores backbone-only weights; input/output
+  # projections are excluded and initialized at action_dim=2. No rebuild needed.
+
+data:
+  train:
+    video_size: [512, 480]
+    camera_layout: front
+
+lr_scheduler_type: cosine
+learning_rate: 1e-4
+num_epochs: 30
+max_steps: null
+log_every: 10
+save_every: 2000
+eval_every: 2000
+eval_num_inference_steps: 10
+gradient_accumulation_steps: 1
+weight_decay: 1e-2
+resume: null

@@ -41,12 +41,12 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
-        self.save_final_checkpoint = bool(cfg.get("save_final_checkpoint", True))
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
+        self.save_final_checkpoint = bool(cfg.get("save_final_checkpoint", True))
         
         self.resume = cfg.resume
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
@@ -84,10 +84,7 @@ class Wan22Trainer:
         # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
         # only the DiT (the MoT architecture) and proprio encoder (if exists) are trainable, matching DiffSynth's freeze_except("dit") behavior.
         self._apply_dit_only_train_mode(self.model)
-        trainable_params = list(self.model.dit.parameters())
-        proprio_encoder = getattr(self.model, "proprio_encoder", None)
-        if proprio_encoder is not None:
-            trainable_params.extend(list(proprio_encoder.parameters()))
+        trainable_params = self._get_trainable_parameters(self.model)
         self.optimizer = torch.optim.AdamW(
             trainable_params,
             lr=self.learning_rate,
@@ -143,6 +140,31 @@ class Wan22Trainer:
 
     def _finish_tensorboard(self):
         self.accelerator.end_training()
+
+    def _log_evaluation(self, metrics):
+        if metrics.get("eval_mode") == "action_only":
+            logger.info(
+                "[eval] step=%d samples=%d ADE=%.4f FDE=%.4f RFS=%.4f",
+                self.global_step, metrics["num_samples"], metrics["ADE"], metrics["FDE"], metrics["RFS"],
+            )
+            self._tensorboard_log({
+                f"eval/{key}": float(value)
+                for key, value in metrics.items() if isinstance(value, (int, float))
+            })
+            return
+        description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
+            self.global_step, metrics["val_loss"], metrics["psnr_rd"], metrics["ssim_rd"],
+        )
+        for key in ("action_l2", "action_l1"):
+            if key in metrics:
+                description += f" {key}={metrics[key]:.4f}"
+        logger.info(description)
+        keys = ("val_loss", "psnr_rg", "ssim_rg", "psnr_rd", "ssim_rd", "psnr_dg", "ssim_dg")
+        payload = {f"eval/{key}": float(metrics[key]) for key in keys}
+        for key in ("action_l2", "action_l1"):
+            if key in metrics:
+                payload[f"eval/{key}"] = float(metrics[key])
+        self._tensorboard_log(payload)
 
     def _build_loader(self, dataset, worker_init_fn=None):
         self.train_sampler = ResumableEpochSampler(
@@ -269,10 +291,24 @@ class Wan22Trainer:
         model.requires_grad_(False)
         model.dit.train()
         model.dit.requires_grad_(True)
+        if getattr(model, "freeze_video_dit", False):
+            # Reapply after enabling MoT: construction alone is not sufficient,
+            # because this helper also runs at train start and after evaluation.
+            model.video_expert.requires_grad_(False)
+            model.video_expert.eval()
         proprio_encoder = getattr(model, "proprio_encoder", None)
         if proprio_encoder is not None:
             proprio_encoder.train()
             proprio_encoder.requires_grad_(True)
+
+    @staticmethod
+    def _get_trainable_parameters(model):
+        params = list(model.dit.parameters())
+        proprio_encoder = getattr(model, "proprio_encoder", None)
+        if proprio_encoder is not None:
+            params.extend(proprio_encoder.parameters())
+        # Exclude frozen Video DiT weights before optimizer / ZeRO initialization.
+        return [param for param in params if param.requires_grad]
 
     @staticmethod
     def _to_batched_eval_sample(sample):
@@ -368,6 +404,22 @@ class Wan22Trainer:
     def evaluate(self):
         if self.val_dataset is None:
             return None
+
+        if getattr(self.val_dataset, "evaluation_mode", None) == "action_only":
+            from .datasets.waymo.evaluation import evaluate_waymo_actions
+
+            model = self.accelerator.unwrap_model(self.model)
+            was_dit_training = model.dit.training
+            model.eval()
+            try:
+                return evaluate_waymo_actions(
+                    model=model, dataset=self.val_dataset, accelerator=self.accelerator,
+                    output_dir=Path(self.eval_dir) / f"step_{self.global_step:06d}",
+                    num_inference_steps=self.eval_num_inference_steps, seed=self.seed,
+                )
+            finally:
+                if was_dit_training:
+                    self._set_dit_only_train_mode()
 
         model = self.accelerator.unwrap_model(self.model)
         was_dit_training = model.dit.training
@@ -704,31 +756,7 @@ class Wan22Trainer:
                             metrics = self.evaluate()   # evalute (visulization + spot check)
                             self.accelerator.wait_for_everyone()
                             if metrics is not None and self.accelerator.is_main_process:
-                                description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
-                                    self.global_step,
-                                    metrics["val_loss"],
-                                    metrics["psnr_rd"],
-                                    metrics["ssim_rd"],
-                                )
-                                if "action_l2" in metrics:
-                                    description += " action_l2=%.4f" % metrics["action_l2"]
-                                if "action_l1" in metrics:
-                                    description += " action_l1=%.4f" % metrics["action_l1"]
-                                logger.info(description)
-                                eval_payload = {
-                                    "eval/val_loss": float(metrics["val_loss"]),
-                                    "eval/psnr_rg": float(metrics["psnr_rg"]),
-                                    "eval/ssim_rg": float(metrics["ssim_rg"]),
-                                    "eval/psnr_rd": float(metrics["psnr_rd"]),
-                                    "eval/ssim_rd": float(metrics["ssim_rd"]),
-                                    "eval/psnr_dg": float(metrics["psnr_dg"]),
-                                    "eval/ssim_dg": float(metrics["ssim_dg"]),
-                                }
-                                if "action_l2" in metrics:
-                                    eval_payload["eval/action_l2"] = float(metrics["action_l2"])
-                                if "action_l1" in metrics:
-                                    eval_payload["eval/action_l1"] = float(metrics["action_l1"])
-                                self._tensorboard_log(eval_payload)
+                                self._log_evaluation(metrics)
 
                         if self.save_every > 0 and self.global_step % self.save_every == 0:
                             ckpt_info = self.save_checkpoint()
@@ -763,6 +791,8 @@ class Wan22Trainer:
                         ckpt_info["weights_path"],
                         ckpt_info["state_path"],
                     )
+            elif self.accelerator.is_main_process:
+                logger.info("[done] training finished step=%d (final checkpoint disabled)", self.global_step)
         finally:
             self._finish_tensorboard()
         

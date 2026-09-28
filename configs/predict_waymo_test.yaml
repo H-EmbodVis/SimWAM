@@ -1,0 +1,19 @@
+# @package _global_
+# Label-free Waymo test inference: writes predictions.jsonl for official scoring.
+defaults:
+  - train
+  - override /task: waymo_uncond_front_512x480_1e-4
+  - override /data: waymo_test
+  - _self_
+
+# Set WAYMO_TEST_CHECKPOINT (or pass ckpt=...) to the IL or RL checkpoint to score.
+ckpt: ${oc.env:WAYMO_TEST_CHECKPOINT,./weights/SimWAM-Waymo-RL.pt}
+model:
+  skip_dit_load_from_pretrain: true
+
+PREDICTION:
+  output_dir: ./runs/waymo_test/${now:%Y-%m-%d_%H-%M-%S}
+  num_inference_steps: 10
+  seed: 42
+  max_samples: null
+  device: cuda

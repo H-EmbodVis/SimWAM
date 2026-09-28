@@ -1,0 +1,17 @@
+# Waymo's 479 scored-reference val rows are the RL optimization dataset.
+defaults:
+  - waymo
+  - _self_
+
+train:
+  dataset_jsonl: ${oc.env:WAYMO_GRPO_JSONL,./data/waymo_val_front_current_traj5s_4hz_xy_pref_only.jsonl}
+  num_frames: 1
+  video_frame_mode: current_only
+  # This flag selects current-only samples and keeps raw reference metadata.
+  # The GRPO trainer still optimizes on data.train.
+  is_training_set: false
+  require_preference_trajectories: true
+  # Keep the IL normalization from all 333537 training samples.
+  norm_stats_path: ${oc.env:WAYMO_STATS_PATH,./data/waymo_dataset_stats.json}
+
+val: null

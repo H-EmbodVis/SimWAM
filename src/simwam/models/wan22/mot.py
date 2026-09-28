@@ -26,6 +26,8 @@ class MoT(nn.Module):
         self.mixtures = nn.ModuleDict(mixtures)
         self.expert_order = list(self.mixtures.keys())
         self.mot_checkpoint_mixed_attn = mot_checkpoint_mixed_attn
+        # Opt-in representation control; normal MoT keeps the original joint path.
+        self.detach_video_kv_for_action = False
         if mot_checkpoint_mixed_attn:
             logger.info("Using gradient checkpointing for mixture attention. This will save memory but use more computation.")
 
@@ -423,6 +425,9 @@ class MoT(nn.Module):
                 )
 
             # Mixed attention: action queries attend to cached video K/V plus current action K/V.
+            if self.detach_video_kv_for_action:
+                # Do not mutate the cache: video consumers must retain its graph.
+                k_video, v_video = k_video.detach(), v_video.detach()
             k_cat = torch.cat([k_video, k_action], dim=1)
             v_cat = torch.cat([v_video, v_action], dim=1)
             mixed = self._mixed_attention(
@@ -521,6 +526,15 @@ class MoT(nn.Module):
         if attention_mask.shape[0] != attention_mask.shape[1]:
             raise ValueError(f"`attention_mask` must be square, got shape {tuple(attention_mask.shape)}")
 
+        if self.detach_video_kv_for_action:
+            if self.expert_order != ["video", "action"]:
+                raise ValueError("Detached video K/V requires expert order ['video', 'action'].")
+            video_seq_len = embeds_all["video"].shape[1]
+            if attention_mask.dtype != torch.bool:
+                raise ValueError("Detached video K/V requires a boolean attention mask.")
+            if attention_mask[:video_seq_len, video_seq_len:].any():
+                raise ValueError("Detached video K/V requires video queries to be masked from action tokens.")
+
         tokens_all = {k: v for k, v in embeds_all.items()}
 
         for layer_idx in range(self.num_layers):
@@ -569,19 +583,34 @@ class MoT(nn.Module):
                     "use_gradient_checkpointing": use_gradient_checkpointing,
                 }
 
-            # 3. concat all tokens for mixed attention
-            q_cat = torch.cat(q_chunks, dim=1)
-            k_cat = torch.cat(k_chunks, dim=1)
-            v_cat = torch.cat(v_chunks, dim=1)
-
-            total_seq = q_cat.shape[1]
+            total_seq = sum(seq_lens)
             if attention_mask.shape[0] != total_seq:
                 raise ValueError(
                     "Attention mask seq length mismatch: "
                     f"mask={attention_mask.shape[0]} vs tokens={total_seq}"
                 )
 
-            mixed = self._mixed_attention(q_cat=q_cat, k_cat=k_cat, v_cat=v_cat, attention_mask=attention_mask)
+            if self.detach_video_kv_for_action:
+                # Softmax is per query row. Splitting the two row groups preserves
+                # forward values while stopping action-loss gradients into video K/V.
+                # The video branch MUST use live K/V for its own video loss.
+                mixed_video = self._mixed_attention(
+                    q_cat=q_chunks[0], k_cat=k_chunks[0], v_cat=v_chunks[0],
+                    attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                )
+                mixed_action = self._mixed_attention(
+                    q_cat=q_chunks[1],
+                    k_cat=torch.cat([k_chunks[0].detach(), k_chunks[1]], dim=1),
+                    v_cat=torch.cat([v_chunks[0].detach(), v_chunks[1]], dim=1),
+                    attention_mask=attention_mask[video_seq_len:, :],
+                )
+                mixed = torch.cat([mixed_video, mixed_action], dim=1)
+            else:
+                # Original joint MoT attention, unchanged for existing experiments.
+                q_cat = torch.cat(q_chunks, dim=1)
+                k_cat = torch.cat(k_chunks, dim=1)
+                v_cat = torch.cat(v_chunks, dim=1)
+                mixed = self._mixed_attention(q_cat=q_cat, k_cat=k_cat, v_cat=v_cat, attention_mask=attention_mask)
 
             start = 0
             for name, seq_len in zip(self.expert_order, seq_lens):
@@ -608,4 +637,3 @@ class MoT(nn.Module):
                 start = end
 
         return tokens_all
-

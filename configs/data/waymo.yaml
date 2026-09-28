@@ -1,0 +1,49 @@
+train:
+  _target_: simwam.datasets.waymo.waymo_dataset.WaymoVideoDataset
+  dataset_jsonl: ${oc.env:WAYMO_TRAIN_JSONL,./data/waymo_training_front_video4s_traj5s_4hz_xy.jsonl}
+  # Manifest image paths are relative and resolved against this root, e.g.
+  # <image_root>/images/training/<scene_id>/FRONT/000.jpg
+  image_root: ${oc.env:WAYMO_DATA_ROOT,./data/waymo}
+  # video_size is [height,width]: requested width 480 x height 512.
+  video_size: [512, 480]
+  camera_layout: front
+  num_frames: 5
+  video_frame_mode: current_plus_future
+  is_training_set: true
+  # Native +0.25,...,+5.0s XY; no heading and no trajectory interpolation.
+  future_action_horizon: 20
+  action_dim: 2
+  state_dim: 8
+  proprio_dim: ${data.train.state_dim}
+  trajectory_mode: absolute
+  normalize_action: true
+  norm_stats_path: ${oc.env:WAYMO_STATS_PATH,./data/waymo_dataset_stats.json}
+  # Identical fixed prompt/cache to PhysicalAI.
+  text_embedding_cache_dir: ${oc.env:WAYMO_TEXT_EMBED_CACHE,${oc.env:NAVSIM_TEXT_EMBED_CACHE,./data/text_embeds_cache/navsim}}
+  context_len: 256
+  text_encoder_id: wan22ti2v5b
+  use_dynamic_prompt: false
+  require_preference_trajectories: false
+
+val:
+  _target_: simwam.datasets.waymo.waymo_dataset.WaymoVideoDataset
+  dataset_jsonl: ${oc.env:WAYMO_VAL_JSONL,./data/waymo_val_front_current_traj5s_4hz_xy_pref_only.jsonl}
+  image_root: ${data.train.image_root}
+  video_size: ${data.train.video_size}
+  camera_layout: front
+  num_frames: 1
+  video_frame_mode: current_only
+  is_training_set: false
+  future_action_horizon: ${data.train.future_action_horizon}
+  action_dim: ${data.train.action_dim}
+  state_dim: ${data.train.state_dim}
+  proprio_dim: ${data.train.proprio_dim}
+  trajectory_mode: absolute
+  normalize_action: ${data.train.normalize_action}
+  # Always reuse bounds estimated over the full training GT, never val/references.
+  norm_stats_path: ${data.train.norm_stats_path}
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+  context_len: ${data.train.context_len}
+  text_encoder_id: ${data.train.text_encoder_id}
+  use_dynamic_prompt: false
+  require_preference_trajectories: true

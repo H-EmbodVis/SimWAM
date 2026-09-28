@@ -1,5 +1,8 @@
 from typing import Any, Optional, Sequence, Union
 
+import os
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,6 +43,7 @@ class SimWAM(torch.nn.Module):
         action_sigma_clamp_min: float = 0.1,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        mot_attention_mask_mode: str = "isolated",
     ):
         super().__init__()
         if action_prediction_type not in ("velocity", "sample"):
@@ -50,6 +54,12 @@ class SimWAM(torch.nn.Module):
             raise ValueError(
                 f"`action_sigma_clamp_min` must be in (0, 1], got {action_sigma_clamp_min}"
             )
+        if mot_attention_mask_mode not in ("isolated", "bidirectional", "action_attends_video"):
+            raise ValueError(
+                "`mot_attention_mask_mode` must be one of 'isolated', 'bidirectional', "
+                f"'action_attends_video', got {mot_attention_mask_mode!r}"
+            )
+        self.mot_attention_mask_mode = str(mot_attention_mask_mode)
         self.action_prediction_type = str(action_prediction_type)
         self.action_sigma_clamp_min = float(action_sigma_clamp_min)
         self.video_expert = video_expert
@@ -145,11 +155,20 @@ class SimWAM(torch.nn.Module):
         action_sigma_clamp_min: float = 0.1,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        mot_attention_mask_mode: str = "isolated",
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for SimWAM.from_wan22_pretrained().")
         if "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config['text_dim']` is required for SimWAM.")
+
+        # Stagger multi-rank weight loads: 8 ranks reading the 5B DiT + T5 into host RAM at
+        # once spikes memory enough for the nohang daemon to SIGTERM a rank.
+        _stagger_s = float(os.environ.get("SIMWAM_LOAD_STAGGER_S", "15"))
+        _local_rank = int(os.environ.get("LOCAL_RANK", "0") or 0)
+        if _local_rank > 0 and _stagger_s > 0:
+            logger.info(f"Rank {_local_rank}: sleeping {_local_rank * _stagger_s:.0f}s to stagger weight load...")
+            time.sleep(_local_rank * _stagger_s)
 
         logger.info(f"Loading Wan2.2-TI2V-5B (DiT VAE and text encoder) pretrained weights and configs for SimWAM initialization...")
         components = load_wan22_ti2v_5b_components(
@@ -205,6 +224,7 @@ class SimWAM(torch.nn.Module):
             action_sigma_clamp_min=action_sigma_clamp_min,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            mot_attention_mask_mode=mot_attention_mask_mode,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -445,8 +465,29 @@ class SimWAM(torch.nn.Module):
         video_tokens_per_frame: int,
         device: torch.device,
     ) -> torch.Tensor:
+        """Build the joint [video+action] MoT attention mask.
+
+        `mask[i, j] == True` means query token `i` may attend to key token `j`.
+        Layout: rows/cols `[0, video_seq_len)` are video tokens (the first
+        `first_frame_tokens` of which are the clean condition frame), and
+        `[video_seq_len, total)` are the action noise tokens.
+
+        The cross-modal visibility between the *noise* tokens is selected by
+        `self.mot_attention_mask_mode`:
+          - "isolated" (default): video and action noise tokens are isolated from
+            each other; action attends only to the clean condition frame, and
+            video never attends to action. (Original SimWAM behavior.)
+          - "bidirectional": video noise tokens and action noise tokens attend to
+            each other. Action attends to the full video sequence; video noise
+            frames attend to action. The clean condition frame stays isolated
+            from action.
+          - "action_attends_video": action noise tokens attend to the full video
+            sequence, but video never attends to action.
+        """
+        mode = self.mot_attention_mask_mode
         total_seq_len = video_seq_len + action_seq_len
         mask = torch.zeros((total_seq_len, total_seq_len), dtype=torch.bool, device=device)
+        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
 
         # video -> video
         mask[:video_seq_len, :video_seq_len] = self.video_expert.build_video_to_video_mask(
@@ -456,9 +497,22 @@ class SimWAM(torch.nn.Module):
         )
         # action -> action
         mask[video_seq_len:, video_seq_len:] = True
-        # action -> first-frame video only
-        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
-        mask[video_seq_len:, :first_frame_tokens] = True
+
+        # action -> video
+        if mode == "isolated":
+            # action attends only to the clean condition (first) frame of video.
+            mask[video_seq_len:, :first_frame_tokens] = True
+        else:
+            # "bidirectional" / "action_attends_video": action noise tokens attend
+            # to all video tokens (condition frame + video noise tokens).
+            mask[video_seq_len:, :video_seq_len] = True
+
+        # video -> action
+        if mode == "bidirectional":
+            # video noise frames attend to action noise tokens; the clean condition
+            # frame ([:first_frame_tokens]) stays isolated from action.
+            mask[first_frame_tokens:video_seq_len, video_seq_len:] = True
+
         return mask
 
     def _compute_video_loss_per_sample(
@@ -813,7 +867,15 @@ class SimWAM(torch.nn.Module):
         test_action_with_infer_action: bool = True,
     ) -> dict[str, Any]:
         self.eval()
-        if test_action_with_infer_action:
+        # The action-only cross-check only makes sense in "isolated" mode: there the
+        # action attends solely to the condition frame in both paths, so infer_joint
+        # and infer_action must agree. In "action_attends_video" the joint action sees
+        # the full generated video (so it legitimately differs from action-only), and
+        # in "bidirectional" infer_action is not even valid. Skip the check otherwise.
+        run_action_only_crosscheck = (
+            test_action_with_infer_action and self.mot_attention_mask_mode == "isolated"
+        )
+        if run_action_only_crosscheck:
             if seed is None:
                 raise ValueError("`test_action_with_infer_action=True` requires non-null `seed`.")
             action_only_out = self.infer_action(
@@ -962,7 +1024,7 @@ class SimWAM(torch.nn.Module):
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
         action_out = latents_action[0].detach().to(device="cpu", dtype=torch.float32)
-        if test_action_with_infer_action:
+        if run_action_only_crosscheck:
             if not torch.allclose(action_out, action_only_out, atol=1e-2, rtol=1e-2):
                 max_abs_diff = (action_out - action_only_out).abs().max().item()
                 logger.warning(
@@ -990,14 +1052,29 @@ class SimWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        num_samples: int = 1,
     ) -> dict[str, Any]:
         '''
-        Infer action sequence from a single image and optional prompt/context.
+        Infer action sequence(s) from a single image and optional prompt/context.
+
+        ``num_samples`` > 1 denoises that many trajectories for the SAME condition in one batch
+        (independent noise per sample) -> returns action of shape [num_samples, T, action_dim].
+        With num_samples == 1 the return is [T, action_dim] (backward compatible).
         '''
         self.eval()
         if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
             raise ValueError(
                 "`infer_action` requires `video_attention_mask_mode='first_frame_causal'`."
+            )
+        if self.mot_attention_mask_mode == "bidirectional":
+            # In bidirectional mode video noise tokens attend to action (and vice
+            # versa), so the video representation depends on action. The action-only
+            # cache path here conditions action on the condition frame alone and never
+            # co-denoises video, which is train/test inconsistent. Use `infer_joint`.
+            raise ValueError(
+                "`infer_action` (action-only) is not supported for "
+                "`mot_attention_mask_mode='bidirectional'`: video and action co-attend "
+                "and must be denoised together. Use `infer_joint` instead."
             )
 
         if input_image.ndim == 3:
@@ -1024,17 +1101,34 @@ class SimWAM(torch.nn.Module):
                 raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
             proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
 
-        generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
-        latents_action = torch.randn(
-            (1, action_horizon, self.action_expert.action_dim),
-            generator=generator,
-            device=rand_device,
-            dtype=torch.float32,
-        ).to(device=self.device, dtype=self.torch_dtype)
+        num_samples = int(num_samples)
+        if num_samples < 1:
+            raise ValueError(f"`num_samples` must be >= 1, got {num_samples}")
+        # Each of the num_samples trajectories starts from INDEPENDENT noise. When a seed is given
+        # we use a distinct per-sample seed (seed + i) so the batch is explicitly de-correlated and
+        # reproducible; without a seed each row is an independent draw anyway.
+        if seed is None:
+            latents_action = torch.randn(
+                (num_samples, action_horizon, self.action_expert.action_dim),
+                device=rand_device, dtype=torch.float32,
+            )
+        else:
+            per_sample = [
+                torch.randn(
+                    (action_horizon, self.action_expert.action_dim),
+                    generator=torch.Generator(device=rand_device).manual_seed(int(seed) + i),
+                    device=rand_device, dtype=torch.float32,
+                )
+                for i in range(num_samples)
+            ]
+            latents_action = torch.stack(per_sample, dim=0)
+        latents_action = latents_action.to(device=self.device, dtype=self.torch_dtype)
 
         # use the first frame as the condition for action inference, which is not noised.
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        if num_samples > 1:  # replicate the single condition latent across the sample batch
+            first_frame_latents = first_frame_latents.repeat(num_samples, *([1] * (first_frame_latents.ndim - 1)))
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
@@ -1065,6 +1159,9 @@ class SimWAM(torch.nn.Module):
                 context_mask=context_mask,
                 proprio=proprio,
             )
+        if num_samples > 1:  # broadcast the (batch-1) condition context to the sample batch
+            context = context.repeat(num_samples, 1, 1)
+            context_mask = context_mask.repeat(num_samples, 1)
 
         timestep_video = torch.zeros(
             (first_frame_latents.shape[0],),
@@ -1104,7 +1201,8 @@ class SimWAM(torch.nn.Module):
             shift_override=sigma_shift,
         )
         for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
-            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            timestep_action = step_t_action.reshape(1).to(dtype=latents_action.dtype, device=self.device)
+            timestep_action = timestep_action.expand(latents_action.shape[0])  # [num_samples]
 
             pred_action_posi = self._predict_action_noise_with_cache(
                 latents_action=latents_action,
@@ -1121,8 +1219,9 @@ class SimWAM(torch.nn.Module):
                 pred_action = self._action_x_to_v(pred_action, latents_action, timestep_action)
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
+        action_out = latents_action.detach().to(device="cpu", dtype=torch.float32)  # [num_samples, T, dim]
         return {
-            "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
+            "action": action_out if num_samples > 1 else action_out[0],
         }
 
     @torch.no_grad()
@@ -1176,7 +1275,9 @@ class SimWAM(torch.nn.Module):
         torch.save(payload, path)
 
     def load_checkpoint(self, path, optimizer=None):
-        payload = torch.load(path, map_location="cpu")
+        # mmap=True: concurrent ranks share one page-cache copy of the (~12GB) checkpoint
+        # instead of each allocating it fully in RAM (nohang killed loads on the 200GB host).
+        payload = torch.load(path, map_location="cpu", mmap=True)
         if "mot" in payload:
             self.mot.load_state_dict(payload["mot"], strict=False)
         elif "dit" in payload:
@@ -1198,4 +1299,3 @@ class SimWAM(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         return self.training_loss(*args, **kwargs)
-

@@ -186,7 +186,8 @@ def _resolve_scene_filter_path(value: str) -> str:
 
     - If ``value`` points to an existing file, use it as-is.
     - Otherwise treat it as a filter name under the standard scene_filter dir,
-      e.g. ``navtrain_hardsub`` -> ``<scene_filter_dir>/navtrain_hardsub.yaml``.
+      e.g. ``navtrain_pdm_score_below0p9`` ->
+      ``<scene_filter_dir>/navtrain_pdm_score_below0p9.yaml``.
     """
     resolved = os.path.expanduser(os.path.expandvars(str(value)))
     candidate = Path(resolved)

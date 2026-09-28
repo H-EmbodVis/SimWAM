@@ -1,5 +1,5 @@
-# navtrain tokens with PDM score in [0, 0.9) on valid==True (base step_044400)
-# source: evaluate_results/navsim_uncond_front_384x672_1e-4_step_044400_navtrain/2026.06.24.20.56.52/2026.06.24.21.21.31.csv
+# navtrain tokens whose base-model PDM score falls in [0, 0.9) on valid frames.
+# Used by the FlowGRPO recipes to focus RL on the hard subset.
 # count: 17389
 _target_: navsim.common.dataclasses.SceneFilter
 _convert_: 'all'

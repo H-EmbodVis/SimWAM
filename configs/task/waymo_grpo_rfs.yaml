@@ -1,0 +1,99 @@
+# @package _global_
+# Waymo reinforcement learning: native 20x2 XY actions, action LoRA, and the
+# official Rater Feedback Score over all 479 scored val rows.
+defaults:
+  - override /data: waymo_grpo_val
+  - override /model: simwam_navsim
+  - _self_
+
+output_dir: ./runs_grpo/waymo_grpo_rfs
+batch_size: 1
+num_workers: 8
+lr_scheduler_type: constant
+learning_rate: 5.0e-5
+lr_warmup_steps: 100
+num_epochs: 10
+# WaymoGRPOTrainer counts four inner updates for each fresh rollout batch.
+# 8 GPUs, B=1: ceil(479/8) * 10 * 4 = 2400 optimizer steps.
+max_steps: null
+log_every: 5
+save_every: 240
+eval_every: 240
+gradient_accumulation_steps: 1
+mixed_precision: bf16
+max_grad_norm: 1.0
+weight_decay: 0.01
+seed: 42
+resume: null
+
+model:
+  _target_: simwam.runtime_grpo.create_simwam_grpo
+  # Supervised warm start. Override on the CLI or export WAYMO_IL_CHECKPOINT.
+  checkpoint_path: ${oc.env:WAYMO_IL_CHECKPOINT,./weights/SimWAM-Waymo-IL.pt}
+  skip_dit_load_from_pretrain: true
+  mot_checkpoint_mixed_attn: false
+  mot_attention_mask_mode: isolated
+  video_dit_config:
+    action_conditioned: false
+    action_dim: ${data.train.action_dim}
+  action_dit_config:
+    action_dim: ${data.train.action_dim}
+
+grpo:
+  target: action
+  sample:
+    group_size: 8
+    num_inference_steps: 10
+    infer_shift: null
+    sample_noise_std: 0.1
+    logprob_noise_std: null
+    anneal_noise: true
+    min_std: 0.001
+    randn_clip: 5.0
+    logprob_clamp_mode: relative
+    logprob_clamp_width: 7.0
+    final_action_clip: null
+    sde_mode: rigorous
+    noise_level: 0.1
+    train_sde_steps: 3
+    sde_exclude_last_step: false
+    sde_step_indices: null
+    merge_sde_window: false
+  train:
+    denoising_discount: 1.0
+    adv_clip_lower_quantile: 0.0
+    adv_clip_upper_quantile: 1.0
+    adv_eps: 1.0e-8
+    adv_global_std: true
+    drop_zero_adv: true
+    use_bc_loss: false
+    bc_coeff: 0.1
+    kl_beta: 50
+    kl_type: x
+    # The NAVSIM [x,y,heading]=[0.2,1,1] weights become [x,y]=[0.2,1] here.
+    kl_dim_weights: [0.2, 1.0]
+    kl_horizon_weights: null
+    ppo_clip_range: 0.005
+    adv_clip_max: 5.0
+    num_inner_epochs: 4
+    rollout_buffer_batches: 1
+    kl_gate:
+      enabled: false
+      delta: 0.0001
+      asymmetric: false
+  lora:
+    enabled: true
+    r: 16
+    alpha: 32.0
+    dropout: 0.0
+    target_modules: [q, k, v, o]
+  reward:
+    name: rfs
+  eval:
+    enabled: true
+  vis:
+    # The inherited camera renderer uses NavSim scenes; Waymo eval saves XY JSONL.
+    enabled: false
+
+wandb:
+  name: waymo_grpo_rfs

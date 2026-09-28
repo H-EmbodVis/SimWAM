@@ -223,12 +223,21 @@ __marimo__/
 build/
 dist/
 *.egg-info/
-checkpoints/
+checkpoints
 metric_cache_navtrain
 weights/
 runs/
+runs_grpo/
 evaluate_results/
 wandb/
 *.log
 .pytest_cache/
 .qoder/
+
+# Bulky dataset payloads: keep the small normalization/summary JSONs tracked,
+# but never stage multi-hundred-MB manifests or the downloaded image trees.
+data/*.jsonl
+data/navsim/
+data/waymo/*.json
+data/
+data/text_embeds_cache/

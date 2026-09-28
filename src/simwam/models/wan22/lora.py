@@ -56,17 +56,26 @@ def apply_lora_to_module(
     alpha: float = 32.0,
     dropout: float = 0.0,
 ) -> int:
-    """Replace, in place, every ``nn.Linear`` child whose attribute name is in `target_names`
-    with a `LoRALinear`. Recurses into submodules. Returns the number of layers wrapped."""
+    """Wrap Linear projections selected by child name or exact module path.
+
+    Child names retain the original Wan behavior. Exact paths allow backbones
+    with projections such as ``blocks.0.attn1.to_out.0`` to select attention
+    outputs without also wrapping numbered FFN layers.
+    """
     targets: Set[str] = set(target_names)
-    replaced = 0
-    for name, child in list(module.named_children()):
-        if isinstance(child, nn.Linear) and name in targets:
-            setattr(module, name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
-            replaced += 1
-        else:
-            replaced += apply_lora_to_module(child, targets, r=r, alpha=alpha, dropout=dropout)
-    return replaced
+
+    def wrap(parent: nn.Module, prefix: str = "") -> int:
+        replaced = 0
+        for name, child in list(parent.named_children()):
+            path = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, nn.Linear) and (name in targets or path in targets):
+                setattr(parent, name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
+                replaced += 1
+            else:
+                replaced += wrap(child, path)
+        return replaced
+
+    return wrap(module)
 
 
 def merged_state_dict(module: nn.Module) -> dict:
@@ -122,5 +131,3 @@ def remap_vanilla_to_lora_state_dict(module: nn.Module, state_dict: dict) -> dic
                 break
         out[new_key] = value
     return out
-
-

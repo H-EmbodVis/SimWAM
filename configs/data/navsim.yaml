@@ -18,6 +18,11 @@ train:
   action_dim: 3
   state_dim: 8
   use_dynamic_prompt: false
+  # Only affects the fixed prompt (use_dynamic_prompt=false). When true, the prompt says
+  # "Based on the current frame," instead of "Based on the past 2 seconds videos," -- which matches
+  # current_plus_future conditioning (only the current frame is fed as the I2V reference).
+  # Changing this changes sha256(prompt) => you MUST re-run scripts/precomput_text_embed.sh.
+  use_current_frame_prompt: false
   trajectory_mode: absolute   # "absolute" (poses relative to current frame) | "relative" (adjacent-frame SE2 deltas)
   proprio_dim: ${data.train.state_dim}
   normalize_action: true

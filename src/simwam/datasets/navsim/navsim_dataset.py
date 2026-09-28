@@ -44,6 +44,7 @@ class NavSimVideoDataset(torch.utils.data.Dataset):
         pretrained_norm_stats: Optional[str] = None,
         stats_cache_path: Optional[str] = None,
         use_dynamic_prompt: bool = True,
+        use_current_frame_prompt: bool = False,
         trajectory_mode: str = "absolute",
     ):
         super().__init__()
@@ -88,30 +89,40 @@ class NavSimVideoDataset(torch.utils.data.Dataset):
         self.pretrained_norm_stats = pretrained_norm_stats
         self.stats_cache_path = None if stats_cache_path is None else str(stats_cache_path)
         self.use_dynamic_prompt = bool(use_dynamic_prompt)
+        # When True (and use_dynamic_prompt=False), the fixed prompt describes the visual
+        # condition accurately as the current frame ("Based on the current frame,") instead of
+        # the inaccurate "Based on the past N seconds videos," (current_plus_future mode feeds
+        # only the current frame as the I2V reference, no past video frames). Default False
+        # preserves the original prompt byte-for-byte, so existing caches still match.
+        self.use_current_frame_prompt = bool(use_current_frame_prompt)
 
-        if self.num_frames < 2:
+        current_only = self.video_frame_mode == "current_only"
+        if current_only and self.num_frames != 1:
+            raise ValueError("video_frame_mode='current_only' requires num_frames=1.")
+        if current_only and future_action_horizon is None:
+            raise ValueError("current_only requires an explicit future_action_horizon (e.g. 8).")
+        if not current_only and self.num_frames < 2:
             raise ValueError(f"`num_frames` must be >= 2, got {self.num_frames}")
         if self.frame_stride < 1:
             raise ValueError(f"`frame_stride` must be >= 1, got {self.frame_stride}")
-        if (self.num_frames - 1) <= 0:
+        if not current_only and (self.num_frames - 1) <= 0:
             raise ValueError("`num_frames` must define at least one transition.")
         
         #TODO and NOTE: since the VAE encoder use the first frame as reference, and the future frames must be 4 times;
         # so current we dont support "history_plus_future" mode which use the history 4 frames as reference
         # To support "history_plus_future" mode, we need to modify the VAE encoder to use the first frame of the video as reference, and the future frames must be 4 times of the history frames.
         # need change the @src/simwam/models/wan22/wan_video_vae.py 1299-1324: WanVideoVAE.encode_video() to support variable number of history frames and future frames, and use the first frame as reference.
-        # @zhaozc: 2026-5-20
         
-        if self.video_frame_mode not in {"history_plus_future", "current_plus_future"}:
+        if self.video_frame_mode not in {"history_plus_future", "current_plus_future", "current_only"}:
             raise ValueError(
                 f"Unsupported `video_frame_mode`: {self.video_frame_mode}. "
-                "Expected one of ['history_plus_future', 'current_plus_future']."
+                "Expected one of ['history_plus_future', 'current_plus_future', 'current_only']."
             )
         if self.future_action_horizon <= 0:
             raise ValueError(
                 f"`future_action_horizon` must be positive, got {self.future_action_horizon}"
             )
-        if self.future_action_horizon % (self.num_frames - 1) != 0:
+        if not current_only and self.future_action_horizon % (self.num_frames - 1) != 0:
             raise ValueError(
                 "`future_action_horizon` must be divisible by video transitions "
                 f"({self.num_frames - 1}), got {self.future_action_horizon}"
@@ -138,6 +149,12 @@ class NavSimVideoDataset(torch.utils.data.Dataset):
             split_logs_key=self.split_logs_key,
         )
         self.sensor_config = self._build_sensor_config(self.camera_layout)
+        if current_only:
+            # Keep the same scene/trajectory horizon, but load camera pixels only
+            # for the current frame. Both NavSim v1 and v2 support index lists.
+            current_idx = self.scene_filter.num_history_frames - 1
+            for sensor_name in self.sensor_config.get_sensors_at_iteration(current_idx):
+                setattr(self.sensor_config, sensor_name, [current_idx])
         self.scene_loader = self._build_scene_loader(
             data_path=Path(self.navsim_log_path),
             sensor_path=Path(self.sensor_blobs_path),
@@ -218,6 +235,7 @@ class NavSimVideoDataset(torch.utils.data.Dataset):
             speed_mps=speed_mps,
             acc_mps2=acc_mps2,
             use_dynamic_prompt=self.use_dynamic_prompt,
+            use_current_frame_prompt=self.use_current_frame_prompt,
         )
         context, context_mask = self._get_cached_text_context(prompt)
 
@@ -521,14 +539,23 @@ class NavSimVideoDataset(torch.utils.data.Dataset):
         speed_mps: float,
         acc_mps2: float,
         use_dynamic_prompt: bool = True,
+        use_current_frame_prompt: bool = False,
     ) -> str:
         # past_seconds = max((hist_xyh.shape[0] - 1) * 0.5, 0.0)
         past_seconds = 2.0
         future_seconds = 4.0
         if not use_dynamic_prompt:
+            # `use_current_frame_prompt` swaps the (inaccurate) "past N seconds videos" clause for
+            # "the current frame", matching current_plus_future conditioning. Default off => the
+            # original string is reproduced byte-for-byte (same sha256 => same cache file).
+            condition_clause = (
+                "Based on the current frame, "
+                if use_current_frame_prompt
+                else f"Based on the past {past_seconds:.0f} seconds videos, "
+            )
             return (
                 "A high-quality, photorealistic dashboard camera view of autonomous driving. "
-                f"Based on the past {past_seconds:.0f} seconds videos, "
+                f"{condition_clause}"
                 f"predict and generate the next {future_seconds:.0f} seconds of realistic driving continuation, "
                 "Maintain temporal consistency, stable camera perspective, natural motion flow without jitter or artifacts, "
                 "clear details, and realistic physics. "
@@ -600,4 +627,3 @@ class NavSimVideoDataset(torch.utils.data.Dataset):
         result = (context.contiguous(), context_mask.contiguous())
         self._text_context_cache[prompt] = result
         return result
-

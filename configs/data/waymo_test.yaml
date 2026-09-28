@@ -1,0 +1,12 @@
+# Test inputs have current image/state/command and no future labels.
+defaults:
+  - waymo
+  - _self_
+train:
+  _target_: simwam.datasets.waymo.test_dataset.WaymoTestDataset
+  dataset_jsonl: ${oc.env:WAYMO_TEST_JSONL,./data/waymo_test_front_current_input.jsonl}
+  num_frames: 1
+  video_frame_mode: current_only
+  is_training_set: false
+  require_preference_trajectories: false
+val: null
